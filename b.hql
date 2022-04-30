@@ -1,7 +1,8 @@
 SELECT
 table1.col1 as alias1,
 col1,
-*
+side_table1.*,
+max(table1.col1)
 FROM
 (SELECT table2.col2 as col1
   FROM
