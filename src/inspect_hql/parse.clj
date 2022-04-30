@@ -13,13 +13,6 @@
          (list* (str node))
          vec)))
 
-(defn parse [^String src]
-  (println "parsing" src)
-  (-> (ParseDriver.)
-      (.parse src)
-      .getTree
-      node->tree))
-
 (def sub-regex #"\$\{([^\}]+)}")
 
 (defn replace-env [s m]
@@ -54,19 +47,21 @@
 
 (defn remove-comments [s]
   (->> (.split s "\n")
-       (remove #(-> % .trim (.startsWith "#")))
+       (map #(-> % (.split "#") first))
        (string/join "\n")))
 
-(defn parse-all [^String s m]
-  (-> s
-      remove-comments
-      (replace-env m)
-      (.split ";")
-      (->> (remove #(-> % .trim (.startsWith "set"))) (map parse))))
+(defn parse [^String src m]
+  (-> (ParseDriver.)
+      (.parse (-> src remove-comments (replace-env m)))
+      .getTree
+      node->tree))
 
 (def s (slurp "a.hql"))
 (def m (assoc (get-hivevars s)
               "SDATE" "2022-04-11"
               "EDATE" "2022-04-29"))
 
-(dorun (parse-all s m))
+(defn nth-mod [coll index]
+  (as-> index i
+        (mod i (count coll))
+        (nth coll i)))
