@@ -1,10 +1,6 @@
-(ns inspect-hql.trim
+(ns inspect-hql.extract
   (:require
     [inspect-hql.parse :as parse]))
-
-(def parsed (parse/parse (slurp "b.hql") {}))
-(use 'clojure.pprint)
-(pprint parsed)
 
 (defmacro let-v [binding & body]
   `(let [~binding ~'v] ~@body))
@@ -13,6 +9,16 @@
   (into {}
         (for [[k v] m :when v]
           [k v])))
+
+(defn some-let [f s]
+  (some #(when (f %) %) s))
+(defn find-in [v [k & ks]]
+  (cond
+    (number? k) (find-in (nth v k) ks)
+    k
+    (when-let [child (some-let #(and (coll? %) (-> % first (= k))) v)]
+      (find-in child ks))
+    :else v))
 
 (defn _get-select [v alias]
   (when (vector? v)
@@ -67,9 +73,25 @@
    :tables (get-tables v)
    :subqueries (get-subqueries v)})
 
-(defn get-schema [v]
+(defn _get-schema [v]
   (when (vector? v)
     (case (v 0)
       "TOK_TABCOLLIST"
       (->> v rest (map #(get-in % [1 0])))
-      (mapcat get-schema v))))
+      (mapcat _get-schema v))))
+
+(defn get-schema [v]
+  [(find-in v ["TOK_TABNAME" 1 0])
+   (_get-schema v)])
+(defn get-schemas [vs]
+  (into {}
+        (for [[type :as v] vs
+              :when (= "TOK_CREATETABLE" type)]
+          (get-schema v))))
+
+(use 'clojure.pprint)
+(-> "a.hql"
+    slurp
+    (parse/parse-all parse/m)
+    get-schemas
+    pprint)

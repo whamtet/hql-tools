@@ -54,7 +54,8 @@
   (-> (ParseDriver.)
       (.parse (-> src remove-comments (replace-env m)))
       .getTree
-      node->tree))
+      node->tree
+      (get 1)))
 
 (def s (slurp "a.hql"))
 (def m (assoc (get-hivevars s)
@@ -65,3 +66,9 @@
   (as-> index i
         (mod i (count coll))
         (nth coll i)))
+
+(defn parse-all [^String src m]
+  (->> (.split src ";")
+       butlast
+       (remove #(-> % .trim (.startsWith "set hivevar")))
+       (map #(parse % m))))
