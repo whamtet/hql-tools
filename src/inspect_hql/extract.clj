@@ -15,6 +15,8 @@
 
 (defn some-let [f s]
   (some #(when (f %) %) s))
+(defn some-exception [f s msg]
+  (or (some f s) (throw (Exception. msg))))
 (defn find-in [v [k & ks]]
   (cond
     (number? k) (find-in (nth v k) ks)
@@ -87,7 +89,8 @@
   (when (vector? v)
     (case (v 0)
       "TOK_TABCOLLIST"
-      (->> v rest (map #(get-in % [1 0])))
+      (for [[_ [col]] (rest v)]
+        {:col col :alias col})
       (mapcat _get-schema v))))
 (defn get-schema [v]
   [(find-in v ["TOK_TABNAME" 1 0])
@@ -105,7 +108,7 @@
       (cond-let ~v ~@rest))
     `(when-let [~v ~cond1] ~res1)))
 
-(defn _expand-stars [select tables subqueries get-real-table regular-schema]
+(defn _expand-stars [select tables subqueries regular-schema]
   (for [{:keys [col alias table] :as select-info} select
         table-alias (cond
                       (not= "*" col) [nil] ;;placeholder
@@ -116,22 +119,43 @@
                       (subqueries table-alias)
                       (for [{:keys [col alias]} (:select x)]
                         {:col (or alias col) :table table-alias})
-                      (-> table-alias get-real-table regular-schema)
-                      (for [col x]
-                        {:col col :table table-alias})
+                      (regular-schema table-alias)
+                      (for [info x]
+                        (assoc info :table table-alias))
                       :else (throw (Exception. (str "no table for " table-alias))))]
     col))
 
-(defn expand-stars [{:keys [select subqueries tables] :as m} regular-schema]
-  (let [get-real-table (zipmap-by :alias :table tables)
-        subqueries (value-map #(expand-stars % regular-schema) subqueries)]
+(defn expand-stars [{:keys [subqueries tables] :as m} regular-schema]
+  (let [subqueries (value-map #(expand-stars % regular-schema) subqueries)
+        ;; this must come after
+        regular-schema (comp regular-schema (zipmap-by :alias :table tables))]
     (-> m
         (assoc :subqueries subqueries)
-        (update :select _expand-stars tables subqueries get-real-table regular-schema)
-        (update :cols _expand-stars tables subqueries get-real-table regular-schema))))
+        (update :select _expand-stars tables subqueries regular-schema)
+        (update :cols _expand-stars tables subqueries regular-schema))))
+
+(defn _assign-tables [select all-colls]
+  (for [{:keys [table col] :as info} select]
+    (if table
+      info
+      (some-exception
+       #(when (-> % :alias (= col)) (assoc info :table (:src-table %)))
+       all-colls
+       (str "No col found for " info)))))
+(defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
+  (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
+        all-colls (for [{:keys [table alias]} tables
+                        col (or
+                             (some-> alias subqueries :select)
+                             (regular-schema table))]
+                    (assoc col :src-table alias))]
+    (-> m
+        (assoc :subqueries subqueries)
+        (update :select _assign-tables all-colls)
+        (update :cols _assign-tables all-colls))))
 
 (use 'clojure.pprint)
 (let [parsed (-> "b.hql" slurp (parse/parse-all parse/m))
       schemas (get-schemas parsed)
-      subquery (-> parsed last get-full)]
-  (pprint (expand-stars subquery schemas)))
+      subquery (-> parsed last get-full (expand-stars schemas) (assign-tables schemas))]
+  (pprint subquery))

@@ -2,10 +2,16 @@ CREATE TABLE side_table1 (
   side_col1 STRING
 );
 CREATE TABLE side_table2 (
-  side_col2 STRING
+  side_col2 STRING,
+  hi STRING,
+  there STRING
 );
 CREATE TABLE side_table3 (
   side_col3 STRING
+);
+CREATE TABLE table3 (
+  table3a STRING,
+  table3b STRING
 );
 
 SELECT
