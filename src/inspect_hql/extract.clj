@@ -1,5 +1,6 @@
 (ns inspect-hql.extract
   (:require
+    [clojure.set :as set]
     [inspect-hql.parse :as parse]))
 
 (defmacro let-v [binding & body]
@@ -23,8 +24,6 @@
     (when-let [child (some-let #(and (coll? %) (-> % first (= k))) v)]
       (find-in child ks))
     :else v))
-(defn set-conj [s x]
-  (conj (or s #{}) x))
 
 (defn _get-cols [v alias select?]
   (when (vector? v)
@@ -162,7 +161,9 @@
 (defn trim-cols [{:keys [select cols] :as m}]
   (let [select-set (->> select (map #(select-keys % [:col :table])) set)
         remover #(-> % (select-keys [:col :table]) select-set)]
-    (assoc m :cols (remove remover cols))))
+    (assoc m
+           :cols (remove remover cols)
+           :required #{})))
 
 (defn get-queries [vs schemas]
   (into {}
@@ -172,6 +173,33 @@
             (find-in v ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1 0])
             "tmp")
            (-> v get-full (expand-stars schemas) (assign-tables schemas) trim-cols)])))
+
+(defn _populate-required [queries ks]
+  (let [{:keys [subqueries cols select tables]} (get-in queries ks)
+        queries (-> queries
+                    (assoc :deps #{})
+                    (update :done conj ks))
+        queries
+        (reduce
+         (fn [queries {:keys [col table]}]
+           (if (subqueries table)
+             (let [new-dep (conj ks table)]
+               (-> queries
+                   (update :deps conj new-dep)
+                   (update-in (conj ks :required) conj col)))
+             (let [real-table (tables table)]
+               (assert real-table "no real table found")
+               (-> queries
+                   (update :deps conj [real-table])
+                   (update-in [real-table :required] conj col)))))
+         queries
+         (concat cols select))]
+    (reduce _populate-required
+            queries
+            (set/difference (:deps queries) (:done queries)))))
+
+(defn populate-required [queries roots]
+  (->> roots (map vector) (reduce _populate-required queries)))
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
