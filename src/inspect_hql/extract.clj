@@ -93,7 +93,7 @@
     (case (v 0)
       "TOK_TABCOLLIST"
       (for [[_ [col]] (rest v)]
-        {:col col :alias col})
+        {:col col})
       (mapcat _get-schema v))))
 (defn get-schema [v]
   [(find-in v ["TOK_TABNAME" 1 0])
@@ -142,7 +142,9 @@
     (if table
       info
       (some-exception
-       #(when (-> % :alias (= col)) (assoc info :table (:src-table %)))
+       #(when (or
+               (-> % :alias (= col))
+               (-> % :col (= col))) (assoc info :table (:src-table %)))
        all-colls
        (str "No col found for " info)))))
 (defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
@@ -157,6 +159,11 @@
         (update :select _assign-tables all-colls)
         (update :cols _assign-tables all-colls))))
 
+(defn trim-cols [{:keys [select cols] :as m}]
+  (let [select-set (->> select (map #(select-keys % [:col :table])) set)
+        remover #(-> % (select-keys [:col :table]) select-set)]
+    (assoc m :cols (remove remover cols))))
+
 (defn get-queries [vs schemas]
   (into {}
         (for [[type :as v] vs
@@ -164,9 +171,7 @@
           [(or
             (find-in v ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1 0])
             "tmp")
-           (-> v get-full (expand-stars schemas) (assign-tables schemas))])))
-
-
+           (-> v get-full (expand-stars schemas) (assign-tables schemas) trim-cols)])))
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
