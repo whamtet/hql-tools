@@ -192,32 +192,47 @@
                (merge-schema k schemas)
                trim-cols)])))
 
-(defn _populate-required [queries ks]
-  (let [{:keys [subqueries cols select tables]} (get-in queries ks)
+(defn _populate-required [queries kv]
+  (let [{:keys [subqueries cols select tables required]} (get-in queries kv)
         queries (-> queries
-                    (assoc :deps #{})
-                    (update :done conj ks))
+                    (assoc :deps #{}))
+        actual-required
+        (concat (filter #(-> % :alias required) select) cols)
         queries
         (reduce
          (fn [queries {:keys [col table]}]
            (if (subqueries table)
-             (let [new-dep (conj ks :subqueries table)]
+             (let [new-dep (conj kv :subqueries table)]
                (-> queries
                    (update :deps conj new-dep)
-                   (update-in (conj ks :required) conj col)))
+                   (update-in (conj new-dep :required) conj col)))
              (let [real-table (tables table)]
-               (assert real-table "no real table found")
-               (-> queries
-                   (update :deps conj [real-table])
-                   (update-in [real-table :required] conj col)))))
+               (assert real-table (format "%s not in tables for kv %s" table kv))
+               (if (queries real-table)
+                 (-> queries
+                     (update :deps conj [real-table])
+                     (update-in [real-table :required] conj col))
+                 (do
+                   (printf "Warning: table %s not found\n" real-table)
+                   queries)))))
          queries
-         (concat cols select))]
+         actual-required)]
     (reduce _populate-required
             queries
-            (set/difference (:deps queries) (:done queries)))))
+            (:deps queries))))
+
+(defn _initial-required [queries root]
+  (let [{:keys [cols select]} (queries root)
+        required (set (map :col (concat cols select)))
+        select (for [{:keys [col alias] :as item} select]
+                 (assoc item :alias (or alias col)))]
+    (-> queries
+        (assoc-in [root :required] required)
+        (assoc-in [root :select] select)
+        (_populate-required [root]))))
 
 (defn populate-required [queries roots]
-  (->> roots (map vector) (reduce _populate-required (assoc queries :done #{}))))
+  (reduce _initial-required queries roots))
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
