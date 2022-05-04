@@ -6,4 +6,4 @@
   :dependencies [[org.clojure/clojure "1.10.3"]
                  [rhizome "0.2.9"]
                  [org.apache.hive/hive-parser "4.0.0-alpha-1"]]
-  :repl-options {:init-ns inspect-hql.parse})
+  :repl-options {:init-ns inspect-hql.extract})

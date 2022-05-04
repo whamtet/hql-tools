@@ -146,33 +146,51 @@
                (-> % :col (= col))) (assoc info :table (:src-table %)))
        all-colls
        (str "No col found for " info)))))
+
 (defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
         all-colls (for [[alias table] tables
                         col (or
                              (some-> alias subqueries :select)
-                             (regular-schema table))]
+                             (regular-schema table)
+                             (throw (Exception. (str "no schema found for table " table))))]
                     (assoc col :src-table alias))]
     (-> m
         (assoc :subqueries subqueries)
         (update :select _assign-tables all-colls)
         (update :cols _assign-tables all-colls))))
 
-(defn trim-cols [{:keys [select cols] :as m}]
-  (let [select-set (->> select (map #(select-keys % [:col :table])) set)
+(defn trim-cols [{:keys [select cols subqueries] :as m}]
+  (let [subqueries (value-map trim-cols subqueries)
+        select-set (->> select (map #(select-keys % [:col :table])) set)
         remover #(-> % (select-keys [:col :table]) select-set)]
     (assoc m
+           :subqueries subqueries
            :cols (remove remover cols)
            :required #{})))
+
+(defn merge-schema [{:keys [select] :as m} k schemas]
+  (if-let [schema (schemas k)]
+    (do
+      (assert (= (count select) (count schema)) (str "schema mismatch for " k))
+      (assoc m :select (map #(assoc %1 :alias (:col %2)) select schema)))
+    m))
 
 (defn get-queries [vs schemas]
   (into {}
         (for [[type :as v] vs
-              :when (= "TOK_QUERY" type)]
-          [(or
-            (find-in v ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1 0])
-            "tmp")
-           (-> v get-full (expand-stars schemas) (assign-tables schemas) trim-cols)])))
+              :when (= "TOK_QUERY" type)
+              :let [k
+                    (or
+                     (find-in v ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1 0])
+                     "tmp")]]
+          [k
+           (-> v
+               get-full
+               (expand-stars schemas)
+               (assign-tables schemas)
+               (merge-schema k schemas)
+               trim-cols)])))
 
 (defn _populate-required [queries ks]
   (let [{:keys [subqueries cols select tables]} (get-in queries ks)
@@ -183,7 +201,7 @@
         (reduce
          (fn [queries {:keys [col table]}]
            (if (subqueries table)
-             (let [new-dep (conj ks table)]
+             (let [new-dep (conj ks :subqueries table)]
                (-> queries
                    (update :deps conj new-dep)
                    (update-in (conj ks :required) conj col)))
@@ -199,10 +217,10 @@
             (set/difference (:deps queries) (:done queries)))))
 
 (defn populate-required [queries roots]
-  (->> roots (map vector) (reduce _populate-required queries)))
+  (->> roots (map vector) (reduce _populate-required (assoc queries :done #{}))))
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
       schemas (get-schemas parsed)
       queries (get-queries parsed schemas)]
-  (pprint queries))
+  (pprint (populate-required queries ["tmp"])))
