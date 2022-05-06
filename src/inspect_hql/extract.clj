@@ -5,6 +5,8 @@
 
 (defmacro let-v [binding & body]
   `(let [~binding ~'v] ~@body))
+(defmacro km [& syms]
+  (zipmap (map keyword syms) syms))
 
 (defn filter-v [m]
   (into {}
@@ -25,34 +27,33 @@
       (find-in child ks))
     :else v))
 
-(defn _get-cols [v alias select?]
+(defn _get-cols [v]
+  (when (vector? v)
+    (case (v 0)
+      "."
+      [{:col (get-in v [2 0])
+        :table (get-in v [1 1 0])}]
+      "TOK_TABLE_OR_COL"
+      [{:col (get-in v [1 0])}]
+      "TOK_ALLCOLREF"
+      [{:col "*"
+        :table (get-in v [1 1 0])}]
+      "TOK_SUBQUERY" nil
+      (mapcat _get-cols v))))
+
+(defn get-cols [v]
+  (->> v _get-cols (map filter-v) distinct))
+
+(defn get-select [v]
   (when (vector? v)
     (case (v 0)
       "TOK_SELEXPR"
-      (let-v [_ v [alias]]
-             (_get-cols v alias true))
-      "."
-      (when select?
-        [{:col (get-in v [2 0])
-          :table (get-in v [1 1 0])
-          :alias alias}])
-      "TOK_TABLE_OR_COL"
-      (when select?
-        [{:col (get-in v [1 0])
-          :alias alias}])
-      "TOK_ALLCOLREF"
-      (when select?
-        [{:col "*"
-          :table (get-in v [1 1 0])
-          :alias alias}])
-      "TOK_SUBQUERY" nil ;;don't go in there
-      (mapcat #(_get-cols % alias select?) v))))
-
-(defn get-cols [v]
-  (->> (_get-cols v nil true) (map filter-v) distinct))
-
-(defn get-select [v]
-  (->> (_get-cols v nil false) (map filter-v) distinct))
+      (let [[_ v [alias]] v
+            cols (_get-cols v)]
+        [{:cols cols
+          :alias (or alias (-> cols first :col))}])
+      "TOK_SUBQUERY" nil
+      (mapcat get-select v))))
 
 (defn _get-tables [v]
   (when (vector? v)
@@ -110,22 +111,25 @@
       (cond-let ~v ~@rest))
     `(when-let [~v ~cond1] ~res1)))
 
-(defn _expand-stars [select tables subqueries regular-schema]
-  (for [{:keys [col alias table] :as select-info} select
+(defn _expand-stars [cols tables subqueries regular-schema]
+  (for [{:keys [col table] :as col-info} cols
         table-alias (cond
                       (not= "*" col) [nil] ;;placeholder
                       table [table]
                       :else (keys tables))
         col (cond-let x
-                      (not= "*" col) [select-info]
+                      (not= "*" col) [col-info]
                       (subqueries table-alias)
-                      (for [{:keys [col alias]} (:select x)]
-                        {:col (or alias col) :table table-alias})
+                      (for [{:keys [alias]} (:select x)]
+                        {:col alias :table table-alias})
                       (regular-schema table-alias)
                       (for [info x]
                         (assoc info :table table-alias))
                       :else (throw (Exception. (str "no table for " table-alias))))]
     col))
+
+(defn expand-stars-select [select tables subqueries regular-schema]
+  (map #(update % :cols _expand-stars tables subqueries regular-schema) select))
 
 (defn expand-stars [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(expand-stars % regular-schema) subqueries)
@@ -133,41 +137,35 @@
         regular-schema (comp regular-schema tables)]
     (-> m
         (assoc :subqueries subqueries)
-        (update :select _expand-stars tables subqueries regular-schema)
+        (update :select expand-stars-select tables subqueries regular-schema)
         (update :cols _expand-stars tables subqueries regular-schema))))
 
-(defn _assign-tables [select all-colls]
-  (for [{:keys [table col] :as info} select]
-    (if table
-      info
-      (some-exception
-       #(when (or
-               (-> % :alias (= col))
-               (-> % :col (= col))) (assoc info :table (:src-table %)))
-       all-colls
-       (str "No col found for " info)))))
+(defn _assign-tables [cols all-cols]
+  (for [{:keys [table col] :as info} cols]
+    (assoc info :table
+           (or
+            table
+            (some
+             #(when (-> % :col (= col)) (:src-table %)) all-cols)
+            (throw (Exception. (str "no col found for " info)))))))
 
+(defn assign-tables-select [select all-cols]
+  (map #(update % :cols _assign-tables all-cols) select))
+
+(defn- alias->col [{:keys [alias]}]
+  {:col alias})
 (defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
-        all-colls (for [[alias table] tables
+        all-cols (for [[alias table] tables
                         col (or
-                             (some-> alias subqueries :select)
+                             (some->> alias subqueries :select (map alias->col))
                              (regular-schema table)
                              (throw (Exception. (str "no schema found for table " table))))]
                     (assoc col :src-table alias))]
     (-> m
         (assoc :subqueries subqueries)
-        (update :select _assign-tables all-colls)
-        (update :cols _assign-tables all-colls))))
-
-(defn trim-cols [{:keys [select cols subqueries] :as m}]
-  (let [subqueries (value-map trim-cols subqueries)
-        select-set (->> select (map #(select-keys % [:col :table])) set)
-        remover #(-> % (select-keys [:col :table]) select-set)]
-    (assoc m
-           :subqueries subqueries
-           :cols (remove remover cols)
-           :required #{})))
+        (update :select assign-tables-select all-cols)
+        (update :cols _assign-tables all-cols))))
 
 (defn merge-schema [{:keys [select] :as m} k schemas]
   (if-let [schema (schemas k)]
@@ -175,6 +173,14 @@
       (assert (= (count select) (count schema)) (str "schema mismatch for " k))
       (assoc m :select (map #(assoc %1 :alias (:col %2)) select schema)))
     m))
+
+(defn trim-cols [{:keys [select cols subqueries] :as m}]
+  (let [subqueries (value-map trim-cols subqueries)
+        remover (->> select (mapcat :cols) set)]
+    (assoc m
+           :subqueries subqueries
+           :cols (remove remover cols)
+           :required #{})))
 
 (defn get-queries [vs schemas]
   (into {}
@@ -222,20 +228,18 @@
             (:deps queries))))
 
 (defn _initial-required [queries root]
-  (let [{:keys [cols select]} (queries root)
-        required (set (map :col (concat cols select)))
-        select (for [{:keys [col alias] :as item} select]
-                 (assoc item :alias (or alias col)))]
-    (-> queries
-        (assoc-in [root :required] required)
-        (assoc-in [root :select] select)
-        (_populate-required [root]))))
+  (-> queries
+      (assoc-in [root :required] (->> (get-in queries [root :select]) (map :alias) set))
+      (_populate-required [root])))
 
 (defn populate-required [queries roots]
   (reduce _initial-required queries roots))
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
-      schemas (get-schemas parsed)
-      queries (get-queries parsed schemas)]
-  (pprint (populate-required queries ["tmp"])))
+      ;schemas (get-schemas parsed)
+      ;queries (get-queries parsed schemas)
+      ]
+  (-> parsed second get-select pprint)
+  ;(populate-required queries ["tmp"])
+  )
