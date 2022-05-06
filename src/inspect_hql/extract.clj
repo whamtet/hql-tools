@@ -48,10 +48,9 @@
   (when (vector? v)
     (case (v 0)
       "TOK_SELEXPR"
-      (let [[_ v [alias]] v
-            cols (_get-cols v)]
-        [{:cols cols
-          :alias (or alias (-> cols first :col))}])
+      (let-v [_ v [alias]]
+             [{:cols (get-cols v)
+               :alias alias}])
       "TOK_SUBQUERY" nil
       (mapcat get-select v))))
 
@@ -93,7 +92,7 @@
     (case (v 0)
       "TOK_TABCOLLIST"
       (for [[_ [col]] (rest v)]
-        {:col col})
+        col)
       (mapcat _get-schema v))))
 (defn get-schema [v]
   [(find-in v ["TOK_TABNAME" 1 0])
@@ -111,34 +110,37 @@
       (cond-let ~v ~@rest))
     `(when-let [~v ~cond1] ~res1)))
 
-(defn _expand-stars [cols tables subqueries regular-schema]
-  (for [{:keys [col table] :as col-info} cols
-        table-alias (cond
-                      (not= "*" col) [nil] ;;placeholder
-                      table [table]
-                      :else (keys tables))
-        col (cond-let x
-                      (not= "*" col) [col-info]
-                      (subqueries table-alias)
-                      (for [{:keys [alias]} (:select x)]
-                        {:col alias :table table-alias})
-                      (regular-schema table-alias)
-                      (for [info x]
-                        (assoc info :table table-alias))
-                      :else (throw (Exception. (str "no table for " table-alias))))]
-    col))
+(defn expand-star-select [{:keys [cols alias]} tables subqueries alias-schema]
+  (if (every? #(-> % :col (not= "*")) cols)
+    [{:cols cols :alias (or alias (-> cols first :col))}]
+    (if (= 1 (count cols))
+      (for [{:keys [table]} cols
+            table-alias (if table [table] (keys tables))
+            col (cond-let x
+                          (subqueries table-alias)
+                          (for [{:keys [alias]} (:select x)]
+                            {:cols [{:col alias :table table-alias}] :alias alias})
+                          (alias-schema table-alias)
+                          (for [synthetic-col x]
+                            {:cols [{:col synthetic-col :table table-alias}] :alias synthetic-col})
+                          :else (throw (Exception. (str "no table for " table-alias))))]
+        col)
+      (throw (Exception. "multi stars unimplemented")))))
 
-(defn expand-stars-select [select tables subqueries regular-schema]
-  (map #(update % :cols _expand-stars tables subqueries regular-schema) select))
+(defn expand-stars-select [select tables subqueries alias-schema]
+  (mapcat #(expand-star-select % tables subqueries alias-schema) select))
+
+(defn expand-stars-cols [cols]
+  (remove #(-> % :col (= "*")) cols))
 
 (defn expand-stars [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(expand-stars % regular-schema) subqueries)
         ;; this must come after
-        regular-schema (comp regular-schema tables)]
+        alias-schema (comp regular-schema tables)]
     (-> m
         (assoc :subqueries subqueries)
-        (update :select expand-stars-select tables subqueries regular-schema)
-        (update :cols _expand-stars tables subqueries regular-schema))))
+        (update :select expand-stars-select tables subqueries alias-schema)
+        (update :cols expand-stars-cols))))
 
 (defn _assign-tables [cols all-cols]
   (for [{:keys [table col] :as info} cols]
@@ -154,12 +156,14 @@
 
 (defn- alias->col [{:keys [alias]}]
   {:col alias})
+(defn- synthetic->col [synthetic]
+  {:col synthetic})
 (defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
         all-cols (for [[alias table] tables
                         col (or
                              (some->> alias subqueries :select (map alias->col))
-                             (regular-schema table)
+                             (some->> table regular-schema (map synthetic->col))
                              (throw (Exception. (str "no schema found for table " table))))]
                     (assoc col :src-table alias))]
     (-> m
@@ -171,7 +175,7 @@
   (if-let [schema (schemas k)]
     (do
       (assert (= (count select) (count schema)) (str "schema mismatch for " k))
-      (assoc m :select (map #(assoc %1 :alias (:col %2)) select schema)))
+      (assoc m :select (map #(assoc %1 :alias %2) select schema)))
     m))
 
 (defn trim-cols [{:keys [select cols subqueries] :as m}]
@@ -203,7 +207,10 @@
         queries (-> queries
                     (assoc :deps #{}))
         actual-required
-        (concat (filter #(-> % :alias required) select) cols)
+        (->> select
+             (filter #(-> % :alias required))
+             (mapcat :cols)
+             (concat cols))
         queries
         (reduce
          (fn [queries {:keys [col table]}]
@@ -229,7 +236,7 @@
 
 (defn _initial-required [queries root]
   (-> queries
-      (assoc-in [root :required] (->> (get-in queries [root :select]) (map :alias) set))
+      (assoc-in [root :required] (->> (get-in queries [root :select]) (mapcat #(map :col (:cols %))) set))
       (_populate-required [root])))
 
 (defn populate-required [queries roots]
@@ -237,9 +244,8 @@
 
 (use 'clojure.pprint)
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
-      ;schemas (get-schemas parsed)
-      ;queries (get-queries parsed schemas)
+      schemas (get-schemas parsed)
+      queries (get-queries parsed schemas)
       ]
-  (-> parsed second get-select pprint)
-  ;(populate-required queries ["tmp"])
-  )
+  (pprint
+   (populate-required queries ["tmp"])))
