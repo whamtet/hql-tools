@@ -71,12 +71,28 @@
 
 (declare get-full)
 
+(defn merge-union-select [{alias1 :alias cols1 :cols}
+                          {alias2 :alias cols2 :cols}]
+  {:alias (or alias1 alias2)
+   :cols (distinct (concat cols1 cols2))})
+(defn merge-union [{select1 :select cols1 :cols tables1 :tables subqueries1 :subqueries}
+                   {select2 :select cols2 :cols tables2 :tables subqueries2 :subqueries}]
+  (assert (= (count select1) (count select2)))
+  {:select (map merge-union-select select1 select2)
+   :cols (distinct (concat cols1 cols2))
+   :tables (merge tables1 tables2)
+   :subqueries (merge subqueries1 subqueries2)})
+
 (defn _get-subqueries [v]
   (when (vector? v)
     (case (v 0)
       "TOK_SUBQUERY"
-      (let-v [_ subquery [alias]]
-             [[alias (get-full subquery)]])
+      (let [[_ subquery [alias]] v
+            union-statements
+            (if-let [union (find-in subquery ["TOK_FROM" "TOK_SUBQUERY" "TOK_UNIONALL"])]
+              (rest union)
+              [subquery])]
+        [[alias (->> union-statements (map get-full) (reduce merge-union))]])
       (mapcat _get-subqueries v))))
 
 (defn get-subqueries [v]
@@ -196,7 +212,7 @@
               :when (= "TOK_QUERY" type)
               :let [k
                     (or
-                     (some-> v (find-in ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1]) join-tabnames)
+                     (some-> v (find-in ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME"]) join-tabnames)
                      "tmp")]]
           [k
            (-> v
