@@ -17,8 +17,6 @@
 
 (defn some-let [f s]
   (some #(when (f %) %) s))
-(defn some-exception [f s msg]
-  (or (some f s) (throw (Exception. msg))))
 (defn find-in [v [k & ks]]
   (cond
     (number? k) (find-in (nth v k) ks)
@@ -92,7 +90,10 @@
     (case (v 0)
       "TOK_TABCOLLIST"
       (for [[_ [col]] (rest v)]
-        col)
+        {:col col})
+      "TOK_TABLEPARTCOLS"
+      (for [[_ [col]] (rest v)]
+        {:col col :partition? true})
       (mapcat _get-schema v))))
 (defn get-schema [v]
   [(find-in v ["TOK_TABNAME" 1 0])
@@ -118,11 +119,11 @@
             table-alias (if table [table] (keys tables))
             col (cond-let x
                           (subqueries table-alias)
-                          (for [{:keys [alias]} (:select x)]
+                          (for [{:keys [alias]} (:select x)] ;; alias predefined recursively
                             {:cols [{:col alias :table table-alias}] :alias alias})
                           (alias-schema table-alias)
                           (for [synthetic-col x]
-                            {:cols [{:col synthetic-col :table table-alias}] :alias synthetic-col})
+                            {:cols [{:col (:col synthetic-col) :table table-alias}] :alias synthetic-col})
                           :else (throw (Exception. (str "no table for " table-alias))))]
         col)
       (throw (Exception. "multi stars unimplemented")))))
@@ -157,7 +158,7 @@
 (defn- alias->col [{:keys [alias]}]
   {:col alias})
 (defn- synthetic->col [synthetic]
-  {:col synthetic})
+  {:col (:col synthetic)})
 (defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
   (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
         all-cols (for [[alias table] tables
@@ -172,10 +173,10 @@
         (update :cols _assign-tables all-cols))))
 
 (defn merge-schema [{:keys [select] :as m} k schemas]
-  (if-let [schema (schemas k)]
+  (if-let [schema (some->> k schemas (remove :partition?))]
     (do
-      (assert (= (count select) (count schema)) (str "schema mismatch for " k))
-      (assoc m :select (map #(assoc %1 :alias %2) select schema)))
+      (assert (= (count select) (count schema)) (format "schema mismatch for %s: %s" k (pr-str schema)))
+      (assoc m :select (map #(assoc %1 :alias (:col %2)) select schema)))
     m))
 
 (defn trim-cols [{:keys [select cols subqueries] :as m}]
@@ -204,13 +205,15 @@
 
 (defn _populate-required [queries kv]
   (let [{:keys [subqueries cols select tables required]} (get-in queries kv)
-        queries (-> queries
-                    (assoc :deps #{}))
         actual-required
         (->> select
              (filter #(-> % :alias required))
              (mapcat :cols)
              (concat cols))
+        excess (remove #(-> % :alias required) select)
+        queries (-> queries
+                    (assoc :deps #{})
+                    (assoc-in (conj kv :excess) excess))
         queries
         (reduce
          (fn [queries {:keys [col table]}]
@@ -236,7 +239,7 @@
 
 (defn _initial-required [queries root]
   (-> queries
-      (assoc-in [root :required] (->> (get-in queries [root :select]) (mapcat #(map :col (:cols %))) set))
+      (assoc-in [root :required] (->> (get-in queries [root :select]) (map :alias) set))
       (_populate-required [root])))
 
 (defn populate-required [queries roots]
@@ -249,3 +252,5 @@
       ]
   (pprint
    (populate-required queries ["tmp"])))
+
+;(-> "d.hql" slurp (parse/parse-all parse/m) pprint)
