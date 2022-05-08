@@ -229,10 +229,8 @@
              (filter #(-> % :alias required))
              (mapcat :cols)
              (concat cols))
-        excess (remove #(-> % :alias required) select)
         queries (-> queries
-                    (assoc :deps #{})
-                    (assoc-in (conj kv :excess) excess))
+                    (assoc :deps #{}))
         queries
         (reduce
          (fn [queries {:keys [col table]}]
@@ -264,12 +262,21 @@
 (defn populate-required [queries roots]
   (reduce _initial-required queries roots))
 
+(defn _populate-excess [{:keys [subqueries required select] :as m}]
+  (let [subqueries (value-map _populate-excess subqueries)
+        excess (remove #(-> % :alias required) select)]
+    (assoc m :subqueries subqueries :excess excess)))
+(defn populate-excess [queries]
+  (value-map _populate-excess (dissoc queries :deps)))
+
 (use 'clojure.pprint)
+
 (let [parsed (-> "c.hql" slurp (parse/parse-all parse/m))
       schemas (get-schemas parsed)
       queries (get-queries parsed schemas)
+      required (populate-required queries ["tmp"])
       ]
   (pprint
-   (populate-required queries ["tmp"])))
+   (populate-excess required)))
 
 ;(-> "d.hql" slurp (parse/parse-all parse/m) pprint)
