@@ -1,6 +1,6 @@
 (ns inspect-hql.extract
   (:require
-    [clojure.set :as set]
+    [clojure.string :as string]
     [inspect-hql.parse :as parse]))
 
 (defmacro let-v [binding & body]
@@ -52,12 +52,15 @@
       "TOK_SUBQUERY" nil
       (mapcat get-select v))))
 
+(defn join-tabnames [[_ & names]]
+  (->> names (map first) (string/join ".")))
 (defn _get-tables [v]
   (when (vector? v)
     (case (v 0)
       "TOK_TABREF"
-      (let-v [_ [_ [table]] [alias]]
-             [[(or alias table) table]])
+      (let [[_ tabnames [alias]] v
+            table (join-tabnames tabnames)]
+        [[(or alias table) table]])
       "TOK_SUBQUERY"
       (let-v [_ subquery [alias]]
              [[alias alias]])
@@ -96,7 +99,7 @@
         {:col col :partition? true})
       (mapcat _get-schema v))))
 (defn get-schema [v]
-  [(find-in v ["TOK_TABNAME" 1 0])
+  [(join-tabnames (find-in v ["TOK_TABNAME"]))
    (_get-schema v)])
 (defn get-schemas [vs]
   (into {}
@@ -193,7 +196,7 @@
               :when (= "TOK_QUERY" type)
               :let [k
                     (or
-                     (find-in v ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1 0])
+                     (some-> v (find-in ["TOK_INSERT" "TOK_DESTINATION" "TOK_TAB" "TOK_TABNAME" 1]) join-tabnames)
                      "tmp")]]
           [k
            (-> v
