@@ -25,29 +25,36 @@
       (find-in child ks))
     :else v))
 
-(defn _get-cols [v]
+(defn _get-cols [keep? v]
   (when (vector? v)
     (case (v 0)
+      "TOK_FROM"
+      (_get-cols true (second v))
+      "TOK_WHERE"
+      (_get-cols true (second v))
       "."
-      [{:col (get-in v [2 0])
-        :table (get-in v [1 1 0])}]
+      (when keep?
+        [{:col (get-in v [2 0])
+          :table (get-in v [1 1 0])}])
       "TOK_TABLE_OR_COL"
-      [{:col (get-in v [1 0])}]
+      (when keep?
+        [{:col (get-in v [1 0])}])
       "TOK_ALLCOLREF"
-      [{:col "*"
-        :table (get-in v [1 1 0])}]
+      (when keep?
+        [{:col "*"
+          :table (get-in v [1 1 0])}])
       "TOK_SUBQUERY" nil
-      (mapcat _get-cols v))))
+      (mapcat #(_get-cols keep? %) v))))
 
 (defn get-cols [v]
-  (->> v _get-cols (map filter-v) distinct))
+  (->> v (_get-cols false) (map filter-v) distinct))
 
 (defn get-select [v]
   (when (vector? v)
     (case (v 0)
       "TOK_SELEXPR"
       (let-v [_ v [alias]]
-             [{:cols (get-cols v)
+             [{:cols (->> v (_get-cols true) (map filter-v) distinct)
                :alias alias}])
       "TOK_SUBQUERY" nil
       (mapcat get-select v))))
@@ -162,24 +169,24 @@
         (update :select expand-stars-select tables subqueries alias-schema)
         (update :cols expand-stars-cols))))
 
-(defn _assign-tables [cols all-cols]
+(defn _assign-tables [cols k all-cols]
   (for [{:keys [table col] :as info} cols]
     (assoc info :table
            (or
             table
             (some
              #(when (-> % :col (= col)) (:src-table %)) all-cols)
-            (throw (Exception. (str "no col found for " info)))))))
+            (throw (Exception. (str "no col found for " info " in table " k)))))))
 
-(defn assign-tables-select [select all-cols]
-  (map #(update % :cols _assign-tables all-cols) select))
+(defn assign-tables-select [select k all-cols]
+  (map #(update % :cols _assign-tables k all-cols) select))
 
 (defn- alias->col [{:keys [alias]}]
   {:col alias})
 (defn- synthetic->col [synthetic]
   {:col (:col synthetic)})
-(defn assign-tables [{:keys [subqueries tables] :as m} regular-schema]
-  (let [subqueries (value-map #(assign-tables % regular-schema) subqueries)
+(defn assign-tables [{:keys [subqueries tables] :as m} k regular-schema]
+  (let [subqueries (value-map #(assign-tables % k regular-schema) subqueries)
         all-cols (for [[alias table] tables
                         col (or
                              (some->> alias subqueries :select (map alias->col))
@@ -188,8 +195,8 @@
                     (assoc col :src-table alias))]
     (-> m
         (assoc :subqueries subqueries)
-        (update :select assign-tables-select all-cols)
-        (update :cols _assign-tables all-cols))))
+        (update :select assign-tables-select k all-cols)
+        (update :cols _assign-tables k all-cols))))
 
 (defn merge-schema [{:keys [select] :as m} k schemas]
   (if-let [schema (some->> k schemas (remove :partition?))]
@@ -198,13 +205,10 @@
       (assoc m :select (map #(assoc %1 :alias (:col %2)) select schema)))
     m))
 
-(defn trim-cols [{:keys [select cols subqueries] :as m}]
-  (let [subqueries (value-map trim-cols subqueries)
-        remover (->> select (mapcat :cols) set)]
-    (assoc m
-           :subqueries subqueries
-           :cols (remove remover cols)
-           :required #{})))
+(defn assoc-required [m]
+  (-> m
+      (update :subqueries #(value-map assoc-required %))
+      (assoc :required #{})))
 
 (defn get-queries [vs schemas]
   (into {}
@@ -218,9 +222,9 @@
            (-> v
                get-full
                (expand-stars schemas)
-               (assign-tables schemas)
+               (assign-tables k schemas)
                (merge-schema k schemas)
-               trim-cols)])))
+               assoc-required)])))
 
 (defn _populate-required [queries kv]
   (let [{:keys [subqueries cols select tables required]} (get-in queries kv)
@@ -279,4 +283,4 @@
   (pprint
    (populate-excess required)))
 
-;(-> "d.hql" slurp (parse/parse-all parse/m) pprint)
+;(-> "d.hql" slurp (parse/parse-all parse/m) first pprint)
