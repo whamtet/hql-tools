@@ -57,11 +57,6 @@
       node->tree
       (get 1)))
 
-(def s (slurp "a.hql"))
-(def m (assoc (get-hivevars s)
-              "SDATE" "2022-04-11"
-              "EDATE" "2022-04-29"))
-
 (defn nth-mod [coll index]
   (as-> index i
         (mod i (count coll))
@@ -72,3 +67,11 @@
        butlast
        (remove #(-> % .trim (.startsWith "set hivevar")))
        (map #(parse % m))))
+
+(defn parse-all-hivevars
+  ([^String src] (parse-all-hivevars src {}))
+  ([^String src m]
+   (parse-all
+    src
+    (merge
+     (get-hivevars s) {"TMPID" "TMPID"} m))))
